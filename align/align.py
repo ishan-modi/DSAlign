@@ -2,8 +2,8 @@ import os
 import json
 import logging
 import argparse
-import deepspeech
 import subprocess
+from subprocess import Popen, PIPE
 import os.path as path
 import numpy as np
 import textdistance
@@ -16,6 +16,7 @@ from utils import enweight, log_progress
 from audio import DEFAULT_RATE, read_frames_from_file, vad_split
 from generate_lm import convert_and_filter_topk, build_lm
 from generate_package import create_bundle
+import scipy.io.wavfile as wf
 
 BEAM_WIDTH = 500
 LM_ALPHA = 1
@@ -60,8 +61,6 @@ def read_script(script_path):
             tc.add_original_text(content)
     return tc
 
-
-model = None
 
 def init_stt(output_graph_path, scorer_path):
     global model
@@ -356,7 +355,7 @@ def align(triple):
     return aligned, len(result_fragments), len(fragments) - len(result_fragments), reasons
 
 
-def main():
+def main(audio_chunks_path,transcript_lst_path):
     # Debug helpers
     logging.basicConfig()
     logging.root.setLevel(args.loglevel if args.loglevel else 20)
@@ -417,21 +416,11 @@ def main():
     logging.debug('Start')
 
     to_align = []
-    output_graph_path = None
+    
     for audio_path, tlog_path, script_path, aligned_path in to_prepare:
         if not exists(tlog_path):
-            generated_scorer = False
-            if output_graph_path is None:
-                logging.debug('Looking for model files in "{}"...'.format(model_dir))
-                output_graph_path = glob(model_dir + "/*.pbmm")[0]
-                lang_scorer_path = glob(model_dir + "/*.scorer")[0]
-            kenlm_path = 'dependencies/kenlm/build/bin'
-            if not path.exists(kenlm_path):
-                kenlm_path = None
-            deepspeech_path = 'dependencies/deepspeech'
-            if not path.exists(deepspeech_path):
-                deepspeech_path = None
-            if kenlm_path and deepspeech_path and not args.stt_no_own_lm:
+            
+            if not args.stt_no_own_lm:
                 tc = read_script(script_path)
                 if not tc.clean_text.strip():
                     logging.error('Cleaned transcript is empty for {}'.format(path.basename(script_path)))
@@ -440,28 +429,7 @@ def main():
                 with open(clean_text_path, 'w', encoding='utf-8') as clean_text_file:
                     clean_text_file.write(tc.clean_text)
 
-                scorer_path = script_path + '.scorer'
-                if not path.exists(scorer_path):
-                    # Generate LM
-                    data_lower, vocab_str = convert_and_filter_topk(scorer_path, clean_text_path, 500000)
-                    build_lm(scorer_path, kenlm_path, 5, '85%', '0|0|1', True, 255, 8, 'trie', data_lower, vocab_str)
-                    os.remove(scorer_path + '.' + 'lower.txt.gz')
-                    os.remove(scorer_path + '.' + 'lm.arpa')
-                    os.remove(scorer_path + '.' + 'lm_filtered.arpa')
-                    os.remove(clean_text_path)
-
-                    # Generate scorer
-                    create_bundle(alphabet_path, scorer_path + '.' + 'lm.binary', scorer_path + '.' + 'vocab-500000.txt', scorer_path, False, 0.931289039105002, 1.1834137581510284)
-                    os.remove(scorer_path + '.' + 'lm.binary')
-                    os.remove(scorer_path + '.' + 'vocab-500000.txt')
-
-                    generated_scorer = True
-            else:
-                scorer_path = lang_scorer_path
-
-            logging.debug('Loading acoustic model from "{}", alphabet from "{}" and scorer from "{}"...'
-                          .format(output_graph_path, alphabet_path, scorer_path))
-
+                
             # Run VAD on the input file
             logging.debug('Transcribing VAD segments...')
             frames = read_frames_from_file(audio_path, model_format, args.audio_vad_frame_length)
@@ -485,11 +453,45 @@ def main():
 
             samples = list(progress(pre_filter(), desc='VAD splitting'))
 
-            pool = multiprocessing.Pool(initializer=init_stt,
-                                        initargs=(output_graph_path, scorer_path),
-                                        processes=args.stt_workers)
-            transcripts = list(progress(pool.imap(stt, samples), desc='Transcribing', total=len(samples)))
+            
+            cnt=1
 
+            for time_start, time_end, audio in samples:
+                print(audio)
+                wf.write(audio_chunks_path+'/test'+str(cnt)+'.wav', 16000, audio)
+
+                if(cnt==1):
+                    f=open(transcript_lst_path+'/transcript.txt','w+')
+                    f.write(str(cnt)+' '+'/root/wav2letter/temp_audio/test'+str(cnt)+'.wav'+' '+str(np.random.randint(500,1000,1)[0])+' Welcome to Glib')
+                    f.close()
+                    f=open(transcript_lst_path+'/transcript.txt','a')
+                else:
+                    f.write('\n'+str(cnt)+' '+'/root/wav2letter/temp_audio/test'+str(cnt)+'.wav'+' '+str(np.random.randint(500,1000,1)[0])+' Welcome to Glib')
+                
+                cnt+=1
+            
+            f.close()    
+            os.rename(transcript_lst_path+'/transcript.txt',transcript_lst_path+'/transcript.lst')
+            
+            decoder_path = "./root/wav2letter/build/Decoder"
+            cfg_path="/root/wav2letter/recipes/models/streaming_convnets/librispeech/decode_500ms_right_future_ngram_other.cfg"
+
+            os.system('[ ! "$(docker ps -a | grep mycontainer)" ] && docker run -d --name mycontainer -i wav2letter-cpu-1')
+            os.system("docker cp "+transcript_lst_path+"/transcript.lst mycontainer:/root/wav2letter/lists/transcript.lst && docker cp -a "+audio_chunks_path+" mycontainer:/root/wav2letter/temp_audio && docker exec -ti mycontainer /bin/bash -c 'export LD_LIBRARY_PATH=/opt/intel/compilers_and_libraries_2018.5.274/linux/mkl/lib/intel64_lin \n ./root/wav2letter/build/Decoder --flagsfile=/root/wav2letter/recipes/models/streaming_convnets/librispeech/decode_500ms_right_future_ngram_other.cfg \n exit' && docker cp mycontainer:/root/wav2letter/lists/transcript.lst.hyp "+transcript_lst_path+"/transcript.lst.hyp")
+            
+            decoder_trans=[]
+            
+            with open(transcript_lst_path+'/transcript.lst.hyp','r') as f:
+                for line in f:
+                    decoder_trans.insert(0,line[:-3])
+        
+            cnt=0
+            transcripts=[]
+            for time_start, time_end, audio in samples:
+                tup=tuple([time_start,time_end,decoder_trans[cnt]])
+                cnt+=1
+                transcripts.append(tup)
+            
             fragments = []
             for time_start, time_end, segment_transcript in transcripts:
                 if segment_transcript is None:
@@ -505,9 +507,7 @@ def main():
             with open(tlog_path, 'w', encoding='utf-8') as tlog_file:
                 tlog_file.write(json.dumps(fragments, indent=4 if args.output_pretty else None, ensure_ascii=False))
 
-            # Remove scorer if generated
-            if generated_scorer:
-                os.remove(scorer_path)
+            
         if not path.isfile(tlog_path):
             fail('Problem loading transcript from "{}"'.format(tlog_path))
         to_align.append((tlog_path, script_path, aligned_path))
@@ -534,7 +534,6 @@ def main():
         for key, number in reasons.most_common():
             logging.info(' - {}: {}'.format(key, number))
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Force align speech data with a transcript.')
 
@@ -547,6 +546,10 @@ def parse_args():
     parser.add_argument('--catalog', type=str,
                         help='Path to a catalog file with paths to transcription log or audio, original script and '
                              '(target) alignment files')
+    parser.add_argument('--audio_chunks', type=str,
+                        help='Path to audio chunks that is transfered to docker')
+    parser.add_argument('--transcript_lst', type=str,
+                        help='Path to transcript.lst that is transfered to docker')
     parser.add_argument('--aligned', type=str,
                         help='Alignment result file (.aligned)')
     parser.add_argument('--force', action="store_true",
@@ -667,16 +670,28 @@ def parse_args():
     return parser.parse_args()
 
 
+
+
 if __name__ == '__main__':
+    
     args = parse_args()
-    model_dir = os.path.expanduser(args.stt_model_dir if args.stt_model_dir else 'models/en')
     if args.alphabet is not None:
         alphabet_path = args.alphabet
-    else:
-        alphabet_path = os.path.join(model_dir, 'alphabet.txt')
+
+    if args.audio_chunks is not None:
+        audio_chunks_path=args.audio_chunks
+
+    if args.transcript_lst is not None:
+        transcript_lst_path=args.transcript_lst    
+
     if not os.path.isfile(alphabet_path):
         fail('Found no alphabet file')
+    if not os.path.isdir(audio_chunks_path):
+        fail('Found no audio')
+    if not os.path.isdir(transcript_lst_path):
+        fail('Found no transcript')
+    
     logging.debug('Loading alphabet from "{}"...'.format(alphabet_path))
     alphabet = Alphabet(alphabet_path)
     model_format = (args.stt_model_rate, 1, 2)
-    main()
+    main(audio_chunks_path,transcript_lst_path)

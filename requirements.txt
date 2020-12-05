@@ -6,3 +6,4 @@ webrtcvad
 textdistance
 pydub
 opuslib
+scipy

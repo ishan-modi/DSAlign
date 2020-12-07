@@ -457,7 +457,6 @@ def main(audio_chunks_path,transcript_lst_path):
             cnt=1
 
             for time_start, time_end, audio in samples:
-                print(audio)
                 wf.write(audio_chunks_path+'/test'+str(cnt)+'.wav', 16000, audio)
 
                 if(cnt==1):
@@ -477,7 +476,7 @@ def main(audio_chunks_path,transcript_lst_path):
             cfg_path="/root/wav2letter/recipes/models/streaming_convnets/librispeech/decode_500ms_right_future_ngram_other.cfg"
 
             os.system('[ ! "$(docker ps -a | grep mycontainer)" ] && docker run -d --name mycontainer -i wav2letter-cpu-1')
-            os.system("docker cp "+transcript_lst_path+"/transcript.lst mycontainer:/root/wav2letter/lists/transcript.lst && docker cp -a "+audio_chunks_path+" mycontainer:/root/wav2letter/temp_audio && docker exec -ti mycontainer /bin/bash -c 'export LD_LIBRARY_PATH=/opt/intel/compilers_and_libraries_2018.5.274/linux/mkl/lib/intel64_lin \n ./root/wav2letter/build/Decoder --flagsfile=/root/wav2letter/recipes/models/streaming_convnets/librispeech/decode_500ms_right_future_ngram_other.cfg \n exit' && docker cp mycontainer:/root/wav2letter/lists/transcript.lst.hyp "+transcript_lst_path+"/transcript.lst.hyp")
+            os.system("docker start mycontainer && docker cp "+transcript_lst_path+"/transcript.lst mycontainer:/root/wav2letter/lists/transcript.lst && docker cp -a "+audio_chunks_path+" mycontainer:/root/wav2letter && docker exec -ti mycontainer /bin/bash -c 'export LD_LIBRARY_PATH=/opt/intel/compilers_and_libraries_2018.5.274/linux/mkl/lib/intel64_lin \n ./root/wav2letter/build/Decoder --flagsfile=/root/wav2letter/recipes/models/streaming_convnets/librispeech/decode_500ms_right_future_ngram_other.cfg \n rm -r /root/wav2letter/temp_audio \n exit' && docker cp mycontainer:/root/wav2letter/lists/transcript.lst.hyp "+transcript_lst_path+"/transcript.lst.hyp && docker stop mycontainer")
             
             decoder_trans=[]
             
@@ -533,6 +532,9 @@ def main(audio_chunks_path,transcript_lst_path):
                                                              dropped_fragments * 100.0 / total_fragments))
         for key, number in reasons.most_common():
             logging.info(' - {}: {}'.format(key, number))
+    
+    logging.info('clean up DSalign')
+    os.system("rm "+audio_chunks_path+"/* && rm "+transcript_lst_path+"/*")
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Force align speech data with a transcript.')
